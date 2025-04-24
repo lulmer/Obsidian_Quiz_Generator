@@ -1,4 +1,4 @@
-type Provider = 'openai' | 'ollama' | 'openrouter' | 'together' | 'huggingface' | 'lmstudio' | 'deepseek' | 'custom';
+type Provider = 'openai' | 'ollama' | 'openrouter' | 'together' | 'lmstudio' | 'deepseek' | 'custom';
 
 type ProviderConfig = {
 	name: string;

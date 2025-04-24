@@ -54,11 +54,6 @@ const DEFAULT_SETTINGS: QuizGeneratorSettings = {
 			baseUrl: 'https://api.together.xyz/v1',
 			requiresApiKey: true,
 		},
-		huggingface: {
-			name: 'Hugging Face',
-			baseUrl: 'https://api-inference.huggingface.co/models',
-			requiresApiKey: true,
-		},
 		lmstudio: {
 			name: 'LM Studio',
 			baseUrl: 'http://localhost:1234/v1',
