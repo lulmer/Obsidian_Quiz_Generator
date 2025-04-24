@@ -32,18 +32,55 @@ const SYSTEM_PROMPT = `You are a quiz generator, you will be feed an input with 
 //const SYSTEM_PROMPT = "You are a Anki Flashcard generator."
 
 const DEFAULT_SETTINGS: QuizGeneratorSettings = {
-	selectedOllamaModel: "",
-	ollamaModels: "",
-	useLocalLLM: true,
-	api_key: "",
-	engine: "gpt-3.5-turbo",//gpt-3.5-turbo
-	max_tokens: 1000,
+	provider: 'openai',
+	providers: {
+		openai: {
+			name: 'OpenAI',
+			baseUrl: 'https://api.openai.com/v1',
+			requiresApiKey: true,
+		},
+		ollama: {
+			name: 'Ollama',
+			baseUrl: 'http://localhost:11434/v1',
+			requiresApiKey: false,
+		},
+		openrouter: {
+			name: 'OpenRouter',
+			baseUrl: 'https://openrouter.ai/api/v1',
+			requiresApiKey: true,
+		},
+		together: {
+			name: 'Together AI',
+			baseUrl: 'https://api.together.xyz/v1',
+			requiresApiKey: true,
+		},
+		huggingface: {
+			name: 'Hugging Face',
+			baseUrl: 'https://api-inference.huggingface.co/models',
+			requiresApiKey: true,
+		},
+		lmstudio: {
+			name: 'LM Studio',
+			baseUrl: 'http://localhost:1234/v1',
+			requiresApiKey: false,
+		},
+		deepseek: {
+			name: 'Deepseek',
+			baseUrl: 'https://api.deepseek.com',
+			requiresApiKey: true,
+		},
+		custom: {
+			name: 'Custom (OpenAI-compatible API)',
+			baseUrl: '',
+			requiresApiKey: true,
+		},
+	},
+	// api_key removed - now stored per provider
+	engine: "gpt-3.5-turbo",
 	temperature: 0.7,
 	frequency_penalty: 0.5,
 	prompt: "",
 	system_prompt: SYSTEM_PROMPT,
-	n_questions: 7,
-	prune: false,
 	showStatusBar: true,
 	outputToBlockQuote: false,
 	promptsPath: "textgenerator/prompts",
@@ -151,10 +188,11 @@ export default class QuizGenPlugin extends Plugin {
 	}
 
 	async loadSettings() {
+		const loadedData = await this.loadData();
 		this.settings = Object.assign(
 			{},
 			DEFAULT_SETTINGS,
-			await this.loadData()
+			loadedData || {}
 		);
 	}
 
@@ -173,93 +211,306 @@ class QuizGenSettingTab extends PluginSettingTab {
 
     display(): void {
         const { containerEl } = this;
-
         containerEl.empty();
 
-        // Toggle between using OpenAI and Ollama
+        // Provider selection
         new Setting(containerEl)
-            .setName("Use Local LLM (Ollama)")
-            .setDesc("Toggle between using OpenAI and Ollama")
-            .addToggle((toggle) =>
-                toggle
-                    .setValue(this.plugin.settings.useLocalLLM)
-                    .onChange(async (value) => {
-                        this.plugin.settings.useLocalLLM = value;
+            .setName("LLM Provider")
+            .setDesc("Select which AI provider to use")
+            .addDropdown((dropdown) => {
+                Object.entries(this.plugin.settings.providers).forEach(([key, provider]) => {
+                    dropdown.addOption(key, provider.name);
+                });
+                
+                dropdown.setValue(this.plugin.settings.provider)
+                    .onChange(async (value: any) => {
+                        this.plugin.settings.provider = value;
                         await this.plugin.saveSettings();
-                        this.display();  // Refresh display based on the toggle
-                    })
-            );
+                        this.display(); // Refresh to show relevant settings
+                    });
+            });
 
-        if (this.plugin.settings.useLocalLLM) {
-            // Ollama specific settings
-            this.fetchAndDisplayOllamaSettings();
+        // Provider-specific settings - handle both async methods safely
+        if (this.plugin.settings.provider === 'custom') {
+            this.displayCustomSettings().catch(error => {
+                console.error("Error displaying custom settings:", error);
+                new Notice("Failed to load custom provider settings");
+            });
         } else {
-            // OpenAI specific settings
-            this.displayOpenAISettings();
+            this.displayStandardSettings().catch(error => {
+                console.error("Error displaying settings:", error);
+                new Notice("Failed to load provider settings");
+            });
         }
+
+        // Common settings for all providers
+        this.displayCommonSettings();
     }
 
-    displayOpenAISettings(): void {
+    async displayStandardSettings(): Promise<void> {
         const { containerEl } = this;
+        const provider = this.plugin.settings.providers[this.plugin.settings.provider];
         
-        new Setting(containerEl)
-            .setName("API Key")
-            .setDesc("It's a secret 👀")
-            .addText((text) =>
-                text
-                    .setPlaceholder("Enter your Open AI API key")
-                    .setValue(this.plugin.settings.api_key)
-                    .onChange(async (value) => {
-                        this.plugin.settings.api_key = value;
-                        await this.plugin.saveSettings();
-                    })
-            );
+        if (provider.requiresApiKey) {
+            new Setting(containerEl)
+                .setName("API Key")
+                .setDesc(`API key for ${provider.name}`)
+                .addText((text) =>
+                    text
+                        .setPlaceholder(`Enter your ${provider.name} API key`)
+                        .setValue(provider.apiKey || "")
+                        .onChange(async (value) => {
+                            this.plugin.settings.providers[this.plugin.settings.provider].apiKey = value;
+                            await this.plugin.saveSettings();
+                        })
+                );
+        }
 
-        new Setting(containerEl)
+        // Model selection
+        let models: any[] = [];
+        let fetchError = false;
+        
+        try {
+            // If API not required or we have a valid API key, try to fetch models
+            if (!provider.requiresApiKey || provider.apiKey) {
+                models = await this.fetchModelsForProvider(this.plugin.settings.provider);
+            }
+        } catch (error) {
+            console.error("Failed to fetch models:", error);
+            fetchError = true;
+        }
+        
+        const modelSetting = new Setting(containerEl)
             .setName("Model")
-            .addDropdown((dropdown) =>
-                dropdown
-					.addOption("gpt-4o", "gpt-4o")
-					.addOption("gpt-4o-mini", "gpt-4o-mini")
+            .setDesc(`Select model for ${provider.name}`);
+            
+        // Add refresh button to fetch models
+        modelSetting.addButton((button) => {
+            button
+                .setButtonText("Refresh Models")
+                .setTooltip("Fetch available models from provider")
+                .onClick(async () => {
+                    new Notice("Fetching available models...");
+                    try {
+                        const freshModels = await this.fetchModelsForProvider(this.plugin.settings.provider);
+                        if (freshModels && freshModels.length > 0) {
+                            new Notice(`Found ${freshModels.length} models from ${provider.name}`);
+                        } else {
+                            new Notice("No models found. Check your API key and connection.");
+                        }
+                        // Refresh the display
+                        this.display();
+                    } catch (error) {
+                        console.error("Failed to fetch models:", error);
+                        new Notice("Failed to fetch models. Check console for details.");
+                    }
+                });
+            });
+            
+        if (models && models.length > 0) {
+            // Show dropdown if we have models
+            modelSetting.addDropdown((dropdown) => {
+                models.forEach(model => {
+                    dropdown.addOption(model.id, model.id);
+                });
+                
+                dropdown.setValue(this.plugin.settings.engine || (models[0]?.id || ""))
+                    .onChange(async (value) => {
+                        this.plugin.settings.engine = value;
+                        await this.plugin.saveSettings();
+                    });
+            });
+        } else {
+            // Fallback to text input with appropriate message
+            const placeholder = fetchError 
+                ? "Failed to fetch models, enter model name manually" 
+                : "Enter model name (e.g., gpt-4o)";
+                
+            modelSetting.addText((text) =>
+                text
+                    .setPlaceholder(placeholder)
                     .setValue(this.plugin.settings.engine)
                     .onChange(async (value) => {
                         this.plugin.settings.engine = value;
                         await this.plugin.saveSettings();
                     })
             );
+        }
+    }
+    
+    async fetchModelsForProvider(providerKey: string): Promise<any[]> {
+        const provider = this.plugin.settings.providers[providerKey];
+        
+        try {
+            const headers: Record<string, string> = {
+                "Content-Type": "application/json"
+            };
+            
+            // Add Authorization header if API key is required
+            if (provider.requiresApiKey && provider.apiKey) {
+                // Anthropic uses a different header format
+                if (provider.apiFormat === 'anthropic') {
+                    headers["x-api-key"] = provider.apiKey;
+                    headers["anthropic-version"] = "2023-06-01";
+                } else {
+                    headers["Authorization"] = `Bearer ${provider.apiKey}`;
+                }
+            }
+            
+            // Use the provider's modelListEndpoint or default to /models
+            const modelEndpoint = provider.modelListEndpoint || '/models';
+            const response = await requestUrl({
+                url: `${provider.baseUrl}${modelEndpoint}`,
+                method: 'GET',
+                headers: headers
+            });
+            
+            if (response.status === 200 && response.json) {
+                // All providers use the 'data' array format for models
+                if (response.json.data) {
+                    if (provider.apiFormat === 'anthropic') {
+                        // For Anthropic, use display_name if available
+                        return response.json.data.map((model: any) => ({
+                            id: model.id,
+                            name: model.display_name || model.id
+                        }));
+                    }
+                    // Standard OpenAI format
+                    return response.json.data;
+                }
+            }
+        } catch (error) {
+            console.error(`Failed to fetch models for ${provider.name}:`, error);
+            new Notice(`Could not fetch models from ${provider.name}. Check your connection.`);
+        }
+        
+        return [];
     }
 
-	async fetchAndDisplayOllamaSettings(): Promise<void> {
-		try {
-			const response = await requestUrl({
-				url: 'http://localhost:11434/api/tags',
-				method: 'GET'
-			});
-			this.plugin.settings.ollamaModels = response.json.models;
-		} catch (error) {
-			console.error("Failed to fetch models:", error);
-			this.plugin.settings.ollamaModels = []; // Reset if fetch fails
-		}
-
-		this.displayOllamaSettings();
-	}
-
-    displayOllamaSettings(): void {
+    async displayCustomSettings(): Promise<void> {
         const { containerEl } = this;
         
         new Setting(containerEl)
-            .setName("Available Models")
-            .setDesc("Select a model from Ollama")
-            .addDropdown((dropdown) => {
-				this.plugin.settings.ollamaModels.forEach((model: { name: string; details: { parameter_size: string } }) => {
-                    dropdown.addOption(model.name, `${model.name} - ${model.details.parameter_size}`);
-                });
-                dropdown.setValue(this.plugin.settings.selectedOllamaModel)
+            .setName("API Base URL")
+            .setDesc("Custom API endpoint URL")
+            .addText((text) =>
+                text
+                    .setPlaceholder("https://api.example.com/v1")
+                    .setValue(this.plugin.settings.providers.custom.baseUrl)
                     .onChange(async (value) => {
-                        this.plugin.settings.selectedOllamaModel = value;
+                        this.plugin.settings.providers.custom.baseUrl = value;
+                        await this.plugin.saveSettings();
+                    })
+            );
+
+        new Setting(containerEl)
+            .setName("API Key")
+            .setDesc("API key for custom endpoint")
+            .addText((text) =>
+                text
+                    .setPlaceholder("Enter your API key")
+                    .setValue(this.plugin.settings.providers.custom.apiKey || "")
+                    .onChange(async (value) => {
+                        this.plugin.settings.providers.custom.apiKey = value;
+                        await this.plugin.saveSettings();
+                    })
+            );
+            
+        // Model selection
+        let models: any[] = [];
+        let fetchError = false;
+        
+        try {
+            // Try to fetch models if we have both URL and API key
+            if (this.plugin.settings.providers.custom.baseUrl && this.plugin.settings.providers.custom.apiKey) {
+                models = await this.fetchModelsForProvider('custom');
+            }
+        } catch (error) {
+            console.error("Failed to fetch models for custom provider:", error);
+            fetchError = true;
+        }
+        
+        const modelSetting = new Setting(containerEl)
+            .setName("Model")
+            .setDesc("Model name for your custom endpoint");
+            
+        // Add refresh button to fetch models
+        modelSetting.addButton((button) => {
+            button
+                .setButtonText("Fetch Models")
+                .setTooltip("Fetch available models from custom endpoint")
+                .onClick(async () => {
+                    if (!this.plugin.settings.providers.custom.baseUrl) {
+                        new Notice("Please enter an API base URL first");
+                        return;
+                    }
+                    
+                    new Notice("Fetching available models...");
+                    try {
+                        const freshModels = await this.fetchModelsForProvider('custom');
+                        if (freshModels && freshModels.length > 0) {
+                            new Notice(`Found ${freshModels.length} models from custom endpoint`);
+                        } else {
+                            new Notice("No models found. Check your API configuration.");
+                        }
+                        // Refresh the display
+                        this.display();
+                    } catch (error) {
+                        console.error("Failed to fetch models:", error);
+                        new Notice("Failed to fetch models. Check console for details.");
+                    }
+                });
+            });
+            
+        if (models && models.length > 0) {
+            // Show dropdown if we have models
+            modelSetting.addDropdown((dropdown) => {
+                models.forEach(model => {
+                    dropdown.addOption(model.id, model.id);
+                });
+                
+                dropdown.setValue(this.plugin.settings.engine || (models[0]?.id || ""))
+                    .onChange(async (value) => {
+                        this.plugin.settings.engine = value;
                         await this.plugin.saveSettings();
                     });
             });
+        } else {
+            // Fallback to text input
+            const placeholder = fetchError 
+                ? "Failed to fetch models, enter model name manually" 
+                : "Enter model name";
+                
+            modelSetting.addText((text) =>
+                text
+                    .setPlaceholder(placeholder)
+                    .setValue(this.plugin.settings.engine)
+                    .onChange(async (value) => {
+                        this.plugin.settings.engine = value;
+                        await this.plugin.saveSettings();
+                    })
+            );
+        }
+    }
+    
+    displayCommonSettings(): void {
+        const { containerEl } = this;
+        
+        // Temperature
+        new Setting(containerEl)
+            .setName("Temperature")
+            .setDesc("Controls randomness (0-1)")
+            .addSlider(slider => 
+                slider
+                    .setLimits(0, 1, 0.1)
+                    .setValue(this.plugin.settings.temperature)
+                    .setDynamicTooltip()
+                    .onChange(async (value) => {
+                        this.plugin.settings.temperature = value;
+                        await this.plugin.saveSettings();
+                    })
+            );
+
     }
 }
 

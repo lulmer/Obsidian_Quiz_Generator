@@ -1,16 +1,25 @@
+type Provider = 'openai' | 'ollama' | 'openrouter' | 'together' | 'huggingface' | 'lmstudio' | 'deepseek' | 'custom';
+
+type ProviderConfig = {
+	name: string;
+	baseUrl: string;
+	requiresApiKey: boolean;
+	apiKey?: string; // Store API key per provider
+	apiFormat?: 'openai'; // Default is 'openai'
+	modelListEndpoint?: string; // Default is /models
+	completionEndpoint?: string; // Default is /chat/completions
+};
+
 type QuizGeneratorSettings = {
-	selectedOllamaModel: string;
-	ollamaModels: any;
-	useLocalLLM: boolean;
-	api_key: string;
+	provider: Provider;
+	providers: Record<Provider, ProviderConfig>;
+	
+	// Common model settings
 	engine: string;
-	max_tokens: number;
 	temperature: number;
 	frequency_penalty: number;
 	system_prompt: string;
 	prompt: string;
-	n_questions: number;
-	prune: boolean;
 	promptsPath: string;
 	showStatusBar: boolean;
 	displayErrorInEditor: boolean;
@@ -77,4 +86,6 @@ export type {
 	Model,
 	InstalledPackage,
 	QuizGeneratorConfiguration,
+	Provider,
+	ProviderConfig,
 };

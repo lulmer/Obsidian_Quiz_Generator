@@ -147,45 +147,75 @@ export default class QuizGenerator {
      */
     private async getQuizFromAPI(settings: QuizGeneratorSettings): Promise<Quiz | null> {
     try {
-        const baseURL = settings.useLocalLLM ? "http://localhost:11434/v1" : "https://api.openai.com/v1";
-        const apiKey = settings.useLocalLLM ? "ollama" : this.plugin.settings.api_key;
-        const model = settings.useLocalLLM ? settings.selectedOllamaModel : settings.engine;
+        const provider = settings.providers[settings.provider];
+        const baseURL = provider.baseUrl;
+        
+        // For custom provider, ensure the baseURL is valid
+        if (settings.provider === 'custom' && !baseURL) {
+            new Notice("Custom provider URL not configured");
+            return null;
+        }
 
+        // Get the appropriate API key and model
+        const apiKey = settings.provider === 'ollama' ? "ollama" : provider.apiKey || "";
+        const model = settings.engine;
+
+        // Prepare headers based on provider requirements
+        const headers: Record<string, string> = {
+            "Content-Type": "application/json"
+        };
+        
+        if (provider.requiresApiKey) {
+            headers["Authorization"] = `Bearer ${apiKey}`;
+        }
+
+        // Build request body (OpenAI format)
+        const requestBody = {
+            model: model,
+            messages: [
+                {
+                    role: "system",
+                    content: "You are an Anki Flashcard Generator, and you only return valid JSON that follows the requested schema."
+                },
+                { role: "user", content: settings.prompt }
+            ],
+            temperature: settings.temperature,
+            response_format: zodResponseFormat(QuizSchema, "quiz_cards"),
+        };
+
+        const endpoint = provider.completionEndpoint || '/chat/completions';
+        
         const response = await requestUrl({
-            url: `${baseURL}/chat/completions`,
+            url: `${baseURL}${endpoint}`,
             method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${apiKey}`
-            },
-            body: JSON.stringify({
-                model: model,
-                messages: [
-                    {
-                        role: "system",
-                        content: "You are an Anki Flashcard Generator, and you only return valid JSON that follows the requested schema."
-                    },
-                    { role: "user", content: settings.prompt }
-                ],
-                temperature: 0,
-                response_format: zodResponseFormat(QuizSchema, "quiz_cards"),
-            })
-                
+            headers: headers,
+            body: JSON.stringify(requestBody)
         });
 
         if (response.status === 200) {
             const data = response.json;
-            const message = data.choices[0]?.message;
-            if (message?.content) {
-                const parsed = JSON.parse(message.content);
-                logger("Parsed quiz data:", parsed);
-                return parsed as Quiz;
+            const content = data.choices[0]?.message?.content;
+            logger("Raw API response:", data);
+            
+            if (content) {
+                try {
+                    const parsed = JSON.parse(content);
+                    logger("Parsed quiz data:", parsed);
+                    return parsed as Quiz;
+                } catch (parseError) {
+                    logger("Failed to parse response as JSON:", parseError);
+                    new Notice("Error: The model response was not valid JSON");
+                }
             }
+        } else {
+            logger("API returned non-200 status:", response.status);
+            new Notice(`API Error: ${response.status} - ${response.text?.substring(0, 100) || "Unknown error"}`);
         }
+        
         return null;
     } catch (error) {
-
         logger("Error fetching quiz data:", error);
+        new Notice(`Error: ${error.message}`);
         return null;
     }
 }
